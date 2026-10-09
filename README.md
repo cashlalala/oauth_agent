@@ -1,5 +1,7 @@
 # A2A learning project: chat agent server + client (Python)
 
+**English** | [繁體中文](README.zh-TW.md)
+
 A hand-written implementation of the core of the **A2A (Agent2Agent) protocol** — no A2A SDK,
 so every byte on the wire is visible in the code. The agent's "brain" is an OpenAI-compatible
 client (`openai` lib) pointed at **OpenRouter** (`openrouter/free` model router).
