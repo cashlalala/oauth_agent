@@ -92,10 +92,62 @@ python demo.py --client-id agent-client --client-secret anything
 
 伺服器設定:`OIDC_ISSUER`(空 = 不驗證)、`OIDC_AUDIENCE`(預設 `a2a-agent`)、`OIDC_SCOPE`
 (預設 `a2a.invoke`,比對 token 的 `scope` 或 `scp`)。用戶端:`--client-id/--client-secret/--scope`
-(或環境變數 `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`),或用 `--token` / `A2A_TOKEN` 直接給現成 token。
+(或環境變數 `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`)、`--login`(以使用者身分在瀏覽器登入),或用 `--token` / `A2A_TOKEN` 直接給現成 token。
 `401` = 沒帶或無效的 token(用戶端會換新 token 重試一次),`403` = token 有效但缺少 scope。
 
+### 取得 token 的兩種方式:以 agent 自己的身分,或以使用者的身分
+
+Agent 只驗證 JWT,所以 client *怎麼*拿到 token 是 client 的事。差別在於 **token 代表誰**(`sub`):
+
+| | client credentials | authorization code + PKCE |
+|---|---|---|
+| 誰在呼叫 | client 程式自己(agent 對 agent、排程、後端) | 使用「人」在操作 client(CLI、桌面程式) |
+| 需要人在場? | 不用 | 要,用瀏覽器登入 |
+| token 的 `sub` | client / agent | 使用者 |
+| 需要密鑰? | 要(`client_secret`) | 不用 - 屬於 *public client*,由 PKCE 取代密鑰 |
+| 參數 | `--client-id X --client-secret Y` | `--login` |
+
+Agent 之間無人值守地互相呼叫(A2A 最常見的情境)用 client credentials。當 agent 需要知道「是哪一個人在問」
+(以該人的權限、稽核紀錄處理),而且 client 跑在人可以開瀏覽器的機器上,就用登入流程。
+
+```
+CLI (A2AClient)               瀏覽器(使用者)               OIDC 提供者
+  | 1. 產生 code_verifier(隨機秘密),code_challenge = SHA256(verifier)
+  | 2. 在 http://127.0.0.1:<隨機埠>/callback 啟動一次性的小型 web server
+  | 3. 開瀏覽器到 authorization_endpoint?client_id&redirect_uri&scope&state&code_challenge
+  |                              |--- 使用者登入、同意 ----------------->|
+  |                              |<-- 302 redirect_uri?code=...&state=... |
+  |<-- 4. 瀏覽器打到本機 server:取得 code 與 state ------------------- |
+  | 5. 檢查 state 與當初送出的一致(否則中止)
+  | 6. POST token_endpoint:grant_type=authorization_code, code, redirect_uri, code_verifier ->|
+  |<-- access_token(sub = 使用者)+ refresh_token ------------------------------------------|
+  | 7. 之後過期 / 收到 401:用 grant_type=refresh_token 更新(不開瀏覽器);失敗才重新登入
+```
+
+每個設計存在的原因:
+- **用瀏覽器,而不是在 CLI 問密碼**:client 永遠看不到使用者的密碼,IdP 也能加上 MFA/SSO。
+- **PKCE**(`code_challenge` / `code_verifier`):CLI 守不住秘密(程式碼人人可讀),所以沒有 `client_secret`。
+  它改成在步驟 6 證明「我就是步驟 3 發起登入的同一支程式」。就算有人從 redirect 偷到 `code`,沒有 verifier
+  (從未離開這個行程)也換不到 token。
+- **`state`**:隨機值,由 IdP 原樣帶回;把 callback 綁定到*這一次*登入,擋掉偽造的 callback(CSRF)。不一致就中止。
+- **Loopback redirect**(`127.0.0.1`、隨機埠,[RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)):原生程式接收 code 的標準做法。
+  只接一個請求,用完即關。真實的提供者需要事先登記這個 redirect URI(多數允許任意 loopback 埠);mock 什麼都接受。
+- **`openid` scope**:自動加上,讓它成為 OIDC 登入;Agent Card 要求的 scope(`a2a.invoke`)接在後面。
+
+```powershell
+docker compose up -d
+$env:OIDC_ISSUER = "http://localhost:8080/a2a"
+python -m a2a_demo.server
+python -m a2a_demo.client --login          # 開啟瀏覽器;在 mock 的頁面隨便輸入使用者名稱(例如 alice)
+# server 日誌會顯示:authenticated sub=alice
+```
+
+未涵蓋:沒有瀏覽器的機器(應改用 device-code flow),以及 A2A 的 `auth-required` 任務狀態
+(agent 執行到一半暫停,請使用者授權某件事)。
+
 關於 mock 提供者([mock-oidc/config.json](mock-oidc/config.json)):
+- 它的登入頁已啟用(`interactiveLogin`);設定檔也把 authorization-code 與 refresh-token 請求對應到同樣的
+  `aud`/`scope`,`sub` 則是在登入頁輸入的使用者名稱。
 - 它會簽出真正的 RS256 JWT,並提供 JWKS 與 OIDC discovery;但預設把 *scope* 放進 `aud`,且沒有 `scope` claim。
   設定檔針對 client-credentials 請求固定 `aud=a2a-agent`、`scope=a2a.invoke`,讓 Agent 的 audience 與 scope 檢查有意義。
 - 它**不會**檢查 client secret,錯誤的 secret 一樣拿得到 token;secret 只有真正的提供者才會把關
@@ -214,8 +266,8 @@ submitted ─► working ──► completed
 - 只支援 `TextPart`(規格另有 `FilePart`、`DataPart`)。
 - 任務狀態存在記憶體,重啟即消失。可把 `TaskStore` 換成 SQLite/Redis。
 - 沒有 `input-required` 流程、`tasks/resubscribe`、推播通知(push notification)、需驗證的擴充 Agent Card。
-- 驗證只涵蓋機器對機器的 OIDC(client-credentials)。沒有使用者登入(authorization code + PKCE)、
-  依技能區分的 scope、token introspection/撤銷。
+- 驗證只支援 client-credentials 與使用者登入(authorization code + PKCE)。沒有 device-code flow、token exchange
+  (on-behalf-of)、依技能區分的 scope、token introspection/撤銷。
 - 只實作 JSON-RPC 傳輸(規格另有 gRPC 與 HTTP+JSON)。
 - 進階挑戰:寫第二個 Agent,同時是本 Agent 的 A2A **用戶端**與自己的 A2A **伺服器**(Agent 串接)。
 

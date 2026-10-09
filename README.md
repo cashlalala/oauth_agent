@@ -90,10 +90,66 @@ python demo.py --client-id agent-client --client-secret anything
 
 Server settings: `OIDC_ISSUER` (empty = open agent), `OIDC_AUDIENCE` (default `a2a-agent`), `OIDC_SCOPE`
 (default `a2a.invoke`; matched against `scope` or `scp`). Client: `--client-id/--client-secret/--scope`
-(or env `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`), or `--token` / `A2A_TOKEN` for a ready-made token.
+(or env `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`), `--login` (browser login as a user), or `--token` / `A2A_TOKEN` for a ready-made token.
 `401` = missing/invalid token (the client refreshes once and retries), `403` = valid token but missing scope.
 
+### Two ways to get a token: the agent itself, or a user
+
+The agent only validates the JWT, so *how* the client got it is the client's choice. What changes is **who the
+token is about** (`sub`):
+
+| | client credentials | authorization code + PKCE |
+|---|---|---|
+| Who is calling | the client program itself (agent -> agent, cron job, backend) | a human using the client (CLI, desktop app) |
+| Human present? | no | yes, logs in with a browser |
+| `sub` in the token | the client/agent | the user |
+| Needs a secret? | yes (`client_secret`) | no - a *public client*; PKCE replaces the secret |
+| Flag | `--client-id X --client-secret Y` | `--login` |
+
+Use client credentials when agents talk to agents unattended (the common A2A case). Use the login flow when the
+agent should know *which person* is asking (to apply that person's permissions or audit trail), and the client
+runs on a machine where a person can open a browser.
+
+```
+CLI (A2AClient)               browser (user)                OIDC provider
+  | 1. make code_verifier (random secret), code_challenge = SHA256(verifier)
+  | 2. start a one-shot web server on http://127.0.0.1:<random port>/callback
+  | 3. open browser at authorization_endpoint?client_id&redirect_uri&scope&state&code_challenge
+  |                              |--- user logs in, consents ----------->|
+  |                              |<-- 302 redirect_uri?code=...&state=... |
+  |<-- 4. browser hits our loopback server: we get code + state ------- |
+  | 5. check state == what we sent (else abort)
+  | 6. POST token_endpoint: grant_type=authorization_code, code, redirect_uri, code_verifier ->|
+  |<-- access_token (sub = the user) + refresh_token ------------------------------------------|
+  | 7. later: expired / 401 -> POST grant_type=refresh_token (no browser); log in again only if that fails
+```
+
+Why each piece exists:
+- **Browser, not a password prompt in the CLI**: the client never sees the user's password, and the IdP can add MFA/SSO.
+- **PKCE** (`code_challenge` / `code_verifier`): a CLI cannot keep a secret (anyone can read its code), so it has no
+  `client_secret`. Instead it proves at step 6 that it is the same program that started the login at step 3. Someone who
+  steals the `code` from the redirect cannot use it without the verifier, which never left the process.
+- **`state`**: a random value echoed back by the IdP; it ties the callback to *this* login attempt and blocks forged
+  callbacks (CSRF). The client aborts on a mismatch.
+- **Loopback redirect** (`127.0.0.1`, random port, [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)): the standard
+  way for a native app to receive the code. It only listens for one request and is closed afterwards. A real provider
+  needs this redirect URI registered for the client (most accept any loopback port); the mock accepts anything.
+- **`openid` scope**: added automatically so it is an OIDC login; the card's scopes (`a2a.invoke`) come after it.
+
+```powershell
+docker compose up -d
+$env:OIDC_ISSUER = "http://localhost:8080/a2a"
+python -m a2a_demo.server
+python -m a2a_demo.client --login          # opens the browser; type any username (e.g. alice) on the mock's page
+# the server log shows:  authenticated sub=alice
+```
+
+Not covered: a headless machine (use the device-code flow instead), and the A2A `auth-required` task state
+(the agent pausing mid-task to ask the user to authorize something).
+
 Notes on the mock provider ([mock-oidc/config.json](mock-oidc/config.json)):
+- Its login page is enabled (`interactiveLogin`); the config also maps authorization-code and refresh-token
+  grants to the same `aud`/`scope`, with `sub` = the username typed on the login page.
 - It signs real RS256 JWTs with a JWKS and serves OIDC discovery, but by default it puts the *scope* into `aud`
   and no `scope` claim. The config pins `aud=a2a-agent` and `scope=a2a.invoke` for client-credentials requests,
   so the agent's audience and scope checks are meaningful.
@@ -125,8 +181,8 @@ carries on and `tasks/get` reads the stored state. This is also why `tasks/cance
 - Only `TextPart` (spec also has `FilePart`, `DataPart`).
 - Task state is in memory — restart loses it. Swap `TaskStore` for SQLite/Redis.
 - No `input-required` flow, `tasks/resubscribe`, push notifications, or authenticated extended card.
-- Auth covers only machine-to-machine OIDC (client-credentials). No user login (authorization code + PKCE),
-  per-skill scopes, or token introspection/revocation.
+- Auth: client-credentials and user login (authorization code + PKCE) only. No device-code flow, token exchange
+  (on-behalf-of), per-skill scopes, or token introspection/revocation.
 - Only the JSON-RPC transport (spec also defines gRPC and HTTP+JSON).
 - Try next: a second agent that is both an A2A *server* and a *client* of this one (agent chaining).
 

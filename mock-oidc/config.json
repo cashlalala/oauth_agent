@@ -1,5 +1,5 @@
 {
-  "interactiveLogin": false,
+  "interactiveLogin": true,
   "httpServer": "NettyWrapper",
   "tokenCallbacks": [
     {
@@ -11,6 +11,15 @@
           "match": "client_credentials",
           "claims": {
             "sub": "a2a-client",
+            "aud": ["a2a-agent"],
+            "scope": "a2a.invoke"
+          }
+        },
+        {
+          "requestParam": "grant_type",
+          "match": "authorization_code|refresh_token",
+          "claims": {
+            "sub": "${subject}",
             "aud": ["a2a-agent"],
             "scope": "a2a.invoke"
           }

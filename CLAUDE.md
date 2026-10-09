@@ -20,7 +20,7 @@ python demo.py                     # scripted protocol tour; requires the server
 
 docker compose up -d                # optional: mock OIDC provider on :8080 (tests/test_auth_live.py skips without it)
 # with the server started using OIDC_ISSUER=http://localhost:8080/a2a:
-python -m a2a_demo.client --client-id agent-client --client-secret x
+python -m a2a_demo.client --client-id agent-client --client-secret x   # or --login for a browser user login
 
 pytest                             # all tests, offline (fake LLM)
 pytest tests/test_a2a.py::test_stream_event_order   # single test
@@ -36,7 +36,7 @@ No linter/formatter is configured. Settings come from `.env` (see `.env.example`
 - State is in-memory (`TaskStore`): `tasks`, `jobs`, and `contexts` (contextId → OpenAI-style chat history). Conversation memory is keyed by `contextId`, not task id; each message makes a new task. Terminal tasks (and any existing `taskId`, since the agent never enters `input-required`) reject further messages with `-32602`.
 - LLM/network failures do not fail the JSON-RPC request: the task ends in state `failed` with the error in `status.message`. JSON-RPC errors are returned as HTTP 200.
 - `message/stream` validates and starts the job *before* opening the SSE response so protocol errors still come back as plain JSON-RPC errors (the client handles a non-`text/event-stream` response for this reason). First SSE event is the `Task`, then status/artifact updates, ending with `final=true`.
-- **Auth** (optional; on when `OIDC_ISSUER` is set): plain HTTP bearer auth, not part of JSON-RPC. The agent card (public) carries `securitySchemes`/`security` with the OIDC discovery URL; `server/auth.py` (`OIDCVerifier`, PyJWT + JWKS cache) is a FastAPI dependency on `POST /` only, failing with HTTP 401/403 + `WWW-Authenticate` (never a JSON-RPC error). `client/auth.py` `TokenSource`s (`ClientCredentials` reads the card -> OIDC discovery -> token endpoint; `StaticBearer`) are injected into `A2AClient(auth=...)`, which retries once on 401 with a fresh token. The mock IdP is `docker-compose.yml` + `mock-oidc/config.json` (navikt/mock-oauth2-server).
+- **Auth** (optional; on when `OIDC_ISSUER` is set): plain HTTP bearer auth, not part of JSON-RPC. The agent card (public) carries `securitySchemes`/`security` with the OIDC discovery URL; `server/auth.py` (`OIDCVerifier`, PyJWT + JWKS cache) is a FastAPI dependency on `POST /` only, failing with HTTP 401/403 + `WWW-Authenticate` (never a JSON-RPC error). `client/auth.py` `TokenSource`s (`ClientCredentials` reads the card -> OIDC discovery -> token endpoint; `AuthorizationCodePKCE` = browser login for a human user via a loopback redirect, refresh-token renewal, `--login`; `StaticBearer`) are injected into `A2AClient(auth=...)`, which retries once on 401 with a fresh token. The mock IdP is `docker-compose.yml` + `mock-oidc/config.json` (navikt/mock-oauth2-server).
 - Client: `client/client.py` (`A2AClient`) takes an optional injected `httpx.AsyncClient` and a `trace(direction, payload)` callback; the CLI and `demo.py` use the trace hook to print raw JSON-RPC. The agent card's `url` overrides the RPC endpoint after discovery.
 
 ## Testing notes

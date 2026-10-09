@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import secrets
 import time
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 from dataclasses import replace
 
 import httpx
@@ -16,11 +18,11 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
-from a2a_demo.client.auth import A2AAuthError, ClientCredentials, StaticBearer
+from a2a_demo.client.auth import A2AAuthError, AuthorizationCodePKCE, ClientCredentials, StaticBearer
 from a2a_demo.client.client import A2AClient
-from a2a_demo.protocol import Task, TaskArtifactUpdateEvent, TaskState
+from a2a_demo.protocol import AgentCard, Task, TaskArtifactUpdateEvent, TaskState
 from a2a_demo.server.app import create_app
 from tests.test_a2a import SETTINGS, FakeLLM
 
@@ -38,15 +40,35 @@ def mint(key=KEY, kid="k1", alg="RS256", **override) -> str:
     return jwt.encode(claims, key, algorithm=alg, headers={"kid": kid})
 
 
+def issue_user_tokens(app: FastAPI, expires_in: int = 300) -> dict:
+    refresh = secrets.token_urlsafe(8)
+    app.state.refresh_tokens.add(refresh)
+    app.state.token_calls += 1
+    return {"access_token": mint(sub="alice"), "refresh_token": refresh, "token_type": "Bearer", "expires_in": expires_in}
+
+
 def fake_idp() -> FastAPI:
     """Just enough OIDC provider: discovery, JWKS and a client-credentials token endpoint."""
     app = FastAPI()
     app.state.token_calls = 0
+    app.state.codes = {}  # authorization code -> authorize request params
+    app.state.refresh_tokens = set()
+    app.state.scopes_requested = []
     jwk = jwt.algorithms.RSAAlgorithm.to_jwk(KEY.public_key(), as_dict=True) | {"kid": "k1", "use": "sig", "alg": "RS256"}
 
     @app.get("/a2a/.well-known/openid-configuration")
     async def discovery():
-        return {"issuer": ISSUER, "token_endpoint": ISSUER + "/token", "jwks_uri": ISSUER + "/jwks"}
+        return {"issuer": ISSUER, "authorization_endpoint": ISSUER + "/authorize",
+                "token_endpoint": ISSUER + "/token", "jwks_uri": ISSUER + "/jwks"}
+
+    @app.get("/a2a/authorize")
+    async def authorize(request: Request):
+        """Auto-approves the "user" alice; remembers the PKCE challenge for the token step."""
+        q = dict(request.query_params)
+        assert q["code_challenge_method"] == "S256" and q["response_type"] == "code"
+        code = secrets.token_urlsafe(8)
+        app.state.codes[code] = q
+        return RedirectResponse(f"{q['redirect_uri']}?{urlencode({'code': code, 'state': q['state']})}")
 
     @app.get("/a2a/jwks")
     async def jwks():
@@ -56,6 +78,19 @@ def fake_idp() -> FastAPI:
     async def token(request: Request):
         basic = request.headers.get("authorization", "")
         form = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
+        grant = form.get("grant_type")
+        if grant == "authorization_code":  # public client: PKCE replaces the client secret
+            q = app.state.codes.pop(form.get("code"), None)  # codes are single-use
+            digest = hashlib.sha256(form.get("code_verifier", "").encode()).digest()
+            challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+            if not q or q["code_challenge"] != challenge or q["redirect_uri"] != form.get("redirect_uri"):
+                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+            app.state.scopes_requested.append(q["scope"])
+            return issue_user_tokens(app)
+        if grant == "refresh_token":
+            if form.get("refresh_token") not in app.state.refresh_tokens:
+                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+            return issue_user_tokens(app)
         want = "Basic " + base64.b64encode(b"agent-client:s3cret").decode()
         if basic != want or form.get("grant_type") != "client_credentials":
             return JSONResponse({"error": "invalid_client"}, status_code=401)
@@ -203,3 +238,107 @@ def test_wrong_client_secret_fails_at_token_endpoint():
             await c.send_message("hi")
 
     run(go, auth=lambda h: ClientCredentials("agent-client", "wrong", http_client=h))
+
+
+# --------------------------------------------------------------------------- #
+# authorization code + PKCE (a user logs in; here a fake "browser" does it)
+# --------------------------------------------------------------------------- #
+def browser_for(idp_app: FastAPI, *, tamper_state: bool = False):
+    """open_browser callback: what a real browser does -- visit the authorize URL at the IdP,
+    follow its redirect to our loopback redirect_uri."""
+
+    def open_browser(url: str) -> None:
+        async def drive() -> None:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=idp_app)) as idp:
+                location = (await idp.get(url)).headers["location"]
+            if tamper_state:
+                location = location.replace("state=", "state=x")
+            async with httpx.AsyncClient() as loopback:  # a real socket: our callback listener
+                await loopback.get(location)
+
+        asyncio.get_running_loop().create_task(drive())
+
+    return open_browser
+
+
+def card_requiring_oidc() -> AgentCard:
+    return AgentCard.model_validate({
+        "name": "a", "description": "d", "url": "http://x/", "version": "1", "capabilities": {},
+        "securitySchemes": {"oidc": {"type": "openIdConnect",
+                                     "openIdConnectUrl": ISSUER + "/.well-known/openid-configuration"}},
+        "security": [{"oidc": ["a2a.invoke"]}]})
+
+
+def pkce_source(idp, **kw) -> AuthorizationCodePKCE:
+    kw.setdefault("open_browser", browser_for(idp))
+    return AuthorizationCodePKCE("a2a-cli", http_client=httpx.AsyncClient(transport=httpx.ASGITransport(app=idp)),
+                                 announce=lambda _: None, **kw)
+
+
+def test_login_with_pkce_end_to_end():
+    async def _run():
+        idp = fake_idp()
+        idp_http = httpx.AsyncClient(transport=httpx.ASGITransport(app=idp))
+        app = create_app(AUTH_SETTINGS, FakeLLM(), idp_http=idp_http)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+            c = A2AClient("http://test", http_client=http, auth=pkce_source(idp))
+            await c.get_agent_card()
+            c._rpc_url = "http://test/"
+            assert (await c.send_message("hi")).status.state == TaskState.completed
+            assert idp.state.scopes_requested == ["openid a2a.invoke"]  # `openid` + the card's scopes
+            await c.send_message("again")
+            assert idp.state.token_calls == 1  # one login, token reused
+
+    asyncio.run(_run())
+
+
+def test_pkce_wrong_verifier_is_rejected_by_idp():
+    """What PKCE protects against: someone who stole the code but does not know the verifier."""
+
+    async def _run():
+        idp = fake_idp()
+        idp.state.codes["stolen"] = {"code_challenge": "hash-of-someone-elses-verifier", "redirect_uri": "http://x"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=idp)) as http:
+            r = await http.post(ISSUER + "/token", data={"grant_type": "authorization_code", "code": "stolen",
+                                "redirect_uri": "http://x", "code_verifier": "attacker-guess"})
+            assert r.status_code == 400
+
+    asyncio.run(_run())
+
+
+def test_login_rejects_callback_with_wrong_state():
+    async def _run():
+        idp = fake_idp()
+        src = pkce_source(idp, open_browser=browser_for(idp, tamper_state=True))
+        with pytest.raises(A2AAuthError, match="state"):
+            await src.token(card_requiring_oidc())
+
+    asyncio.run(_run())
+
+
+def test_login_timeout_when_user_never_finishes():
+    async def _run():
+        src = pkce_source(fake_idp(), open_browser=lambda url: None, login_timeout=0.2)
+        with pytest.raises(A2AAuthError, match="timed out"):
+            await src.token(card_requiring_oidc())
+
+    asyncio.run(_run())
+
+
+def test_expired_token_is_renewed_with_refresh_token_without_new_login():
+    async def _run():
+        idp = fake_idp()
+        logins = []
+        browser = browser_for(idp)
+        src = pkce_source(idp, open_browser=lambda url: (logins.append(url), browser(url)))
+        card = card_requiring_oidc()
+        first = await src.token(card)
+        assert (await src.token(card)) == first and len(logins) == 1  # cached
+        second = await src.token(card, refresh=True)  # as the client does after a 401
+        assert len(logins) == 1  # refresh_token used: the browser did not open again
+        assert jwt.decode(second, options={"verify_signature": False})["sub"] == "alice"
+        src._refresh_token = "revoked"  # refresh token no longer valid -> full login again
+        await src.token(card, refresh=True)
+        assert len(logins) == 2
+
+    asyncio.run(_run())
