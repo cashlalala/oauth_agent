@@ -138,8 +138,7 @@ class AuthorizationCodePKCE:
         return True
 
     async def _login(self, meta: dict[str, Any], scope: str) -> None:
-        verifier = secrets.token_urlsafe(64)  # 86 chars, within RFC 7636's 43..128
-        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        verifier, challenge = new_pkce()
         state = secrets.token_urlsafe(16)
 
         result: asyncio.Future[dict[str, str]] = asyncio.get_running_loop().create_future()
@@ -173,6 +172,13 @@ class AuthorizationCodePKCE:
         self._token = body["access_token"]
         self._expires_at = time.monotonic() + float(body.get("expires_in", 300)) - EXPIRY_SKEW
         self._refresh_token = body.get("refresh_token", self._refresh_token)
+
+
+def new_pkce() -> tuple[str, str]:
+    """(code_verifier, code_challenge): the challenge is the verifier's SHA-256, base64url (RFC 7636 S256)."""
+    verifier = secrets.token_urlsafe(64)  # 86 chars, within RFC 7636's 43..128
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    return verifier, challenge
 
 
 async def _handle_callback(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,

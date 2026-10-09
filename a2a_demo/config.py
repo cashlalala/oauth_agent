@@ -39,3 +39,30 @@ def load_settings() -> Settings:
         oidc_audience=os.getenv("OIDC_AUDIENCE", "a2a-agent"),
         oidc_scope=os.getenv("OIDC_SCOPE", "a2a.invoke"),
     )
+
+
+@dataclass(frozen=True)
+class WebSettings:
+    """The web UI (a2a_demo.web): a separate process that talks to the agent as an A2A client."""
+
+    agent_url: str  # where the A2A agent lives
+    host: str
+    port: int
+    public_url: str  # how the *browser* reaches the web UI; the OIDC redirect_uri is built from it
+    client_id: str  # OAuth2 public client registered at the IdP (PKCE, no secret)
+
+    @property
+    def redirect_uri(self) -> str:
+        return self.public_url.rstrip("/") + "/auth/callback"
+
+
+def load_web_settings() -> WebSettings:
+    s = load_settings()
+    host, port = os.getenv("WEB_HOST", "127.0.0.1"), int(os.getenv("WEB_PORT", "8000"))
+    return WebSettings(
+        agent_url=os.getenv("A2A_AGENT_URL", f"http://{s.host}:{s.port}").rstrip("/"),
+        host=host,
+        port=port,
+        public_url=os.getenv("WEB_PUBLIC_URL", f"http://localhost:{port}").rstrip("/"),
+        client_id=os.getenv("WEB_CLIENT_ID", "a2a-web"),
+    )

@@ -36,9 +36,14 @@ a2a_demo/
     client.py        A2AClient: discovery, JSON-RPC calls, SSE parsing
     auth.py          token sources: card -> OIDC discovery -> client-credentials token
     cli.py           interactive chat (/stream /async /task /cancel /trace /card /new)
+  web/
+    app.py           web UI backend (BFF): static page, /api/chat SSE, /auth/* login routes
+    auth.py          browser login (authorization code + PKCE), server-side WebSession
+    static/          index.html, app.js, style.css (no build step)
 demo.py              scripted tour with wire-level traces
 tests/test_a2a.py    client <-> server tests, in-process, fake LLM
 tests/test_auth.py   OIDC tests with an in-process fake identity provider
+tests/test_web.py    web UI tests: simulated browser + fake IdP + real agent app
 tests/test_auth_live.py  same flow against the real mock server (skipped if it is not running)
 docker-compose.yml   mock OIDC provider (navikt/mock-oauth2-server) + mock-oidc/config.json
 ```
@@ -156,6 +161,41 @@ Notes on the mock provider ([mock-oidc/config.json](mock-oidc/config.json)):
 - It does **not** check client secrets, so a wrong secret still gets a token; the secret is only enforced by a real
   provider (tests/test_auth.py checks that path with the in-process fake IdP).
 - The `iss` claim follows the URL you called (`localhost:8080`), so `OIDC_ISSUER` must use that same host.
+
+## Web UI
+
+A browser chat page (`a2a_demo/web/`) that sits in front of the agent. It is a *separate process* and a normal A2A client
+(it uses the same `A2AClient`), so the agent does not change at all.
+
+```
+browser --(HttpOnly session cookie)--> web app --(Authorization: Bearer <the user's token>)--> A2A agent
+   \--(login redirect, authorization code + PKCE)--> OIDC provider (docker compose)
+```
+
+```powershell
+docker compose up -d                                    # mock OIDC provider
+$env:OIDC_ISSUER = "http://localhost:8080/a2a"
+python -m a2a_demo.server                               # agent (terminal 1)
+python -m a2a_demo.web                                  # web UI (terminal 2) -> http://localhost:8000
+```
+
+Without `OIDC_ISSUER` the agent is open and the page needs no login. With it, the page shows a login gate; the
+mock IdP's page lets you type any username (e.g. `alice`), and the agent log shows `authenticated sub=alice`.
+
+Design notes:
+- **Backend-for-frontend**: the browser never sees a token and never talks to the agent (no CORS, nothing in
+  `localStorage`). The web server runs the login flow (`web/auth.py`, the same PKCE flow as `client --login` but with a
+  web route as `redirect_uri`), keeps the tokens in an in-memory `WebSession`, and refreshes them silently. The browser
+  only holds an opaque `HttpOnly; SameSite=Lax` cookie, rotated after login.
+- It is a public OAuth2 client (`WEB_CLIENT_ID`, default `a2a-web`), no secret. The mock IdP accepts any client id and
+  redirect URI; a real IdP needs `WEB_PUBLIC_URL + /auth/callback` registered.
+- The page streams with `message/stream`; `/api/chat` forwards the raw A2A events as SSE, so the "wire" checkbox shows
+  the real protocol. Stop calls `tasks/cancel`. Model output is rendered with `textContent` (never as HTML).
+- A session can only continue conversations (`contextId`) and cancel tasks it started itself.
+- Run it on the host, not in the compose network: the IdP URLs in the OIDC discovery document must work for both the
+  browser and the web server (`localhost:8080`).
+- Settings: `A2A_AGENT_URL`, `WEB_HOST`, `WEB_PORT`, `WEB_PUBLIC_URL`, `WEB_CLIENT_ID`. Logout only ends the web
+  session, not the IdP's own session (no RP-initiated logout).
 
 ## Request flow (streaming)
 

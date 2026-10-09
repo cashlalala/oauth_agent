@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A2A Chat</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <strong id="agent-name">A2A Chat</strong>
+      <span id="agent-desc" class="muted"></span>
+    </div>
+    <div class="right">
+      <label class="muted"><input type="checkbox" id="wire-toggle"> wire</label>
+      <button id="new-btn" hidden>New chat</button>
+      <span id="user" class="muted"></span>
+      <button id="login-btn" hidden>Log in</button>
+      <button id="logout-btn" hidden>Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="gate" hidden>
+      <p>This agent requires you to sign in.</p>
+      <p id="gate-error" class="error"></p>
+      <button id="gate-login">Log in</button>
+    </section>
+
+    <section id="chat" hidden>
+      <div id="messages"></div>
+      <form id="form">
+        <textarea id="input" rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="send" type="submit">Send</button>
+        <button id="stop" type="button" hidden>Stop</button>
+      </form>
+    </section>
+
+    <aside id="wire" hidden>
+      <h3>Raw A2A events <span class="muted">(message/stream)</span></h3>
+      <pre id="wire-log"></pre>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

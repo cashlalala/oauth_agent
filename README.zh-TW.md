@@ -44,8 +44,13 @@ a2a_demo/
   client/
     client.py        A2AClient:探索、JSON-RPC 呼叫、SSE 解析
     cli.py           互動式聊天(/stream /async /task /cancel /trace /card /new)
+  web/
+    app.py           Web 介面後端(BFF):靜態頁、/api/chat SSE、/auth/* 登入路由
+    auth.py          瀏覽器登入(authorization code + PKCE)、伺服器端 WebSession
+    static/          index.html、app.js、style.css(不需建置)
 demo.py              帶有線路層(wire-level)追蹤的腳本化導覽
 tests/test_a2a.py    用戶端 <-> 伺服器測試(行程內、假 LLM)
+tests/test_web.py    Web 介面測試:模擬瀏覽器 + 假 IdP + 真實 agent app
 ```
 
 建議閱讀順序:`protocol.py` → `server/handler.py` → `server/app.py` → `client/client.py` → `demo.py`。
@@ -153,6 +158,39 @@ python -m a2a_demo.client --login          # 開啟瀏覽器;在 mock 的頁面�
 - 它**不會**檢查 client secret,錯誤的 secret 一樣拿得到 token;secret 只有真正的提供者才會把關
   (tests/test_auth.py 用行程內的假 IdP 測了這條路徑)。
 - `iss` claim 跟著你呼叫的 URL 走(`localhost:8080`),所以 `OIDC_ISSUER` 必須用同一個 host。
+
+## Web 介面
+
+瀏覽器聊天頁(`a2a_demo/web/`),放在 agent 前面。它是**獨立的 process**,本身就是一般的 A2A 用戶端(直接用 `A2AClient`),
+所以 agent 完全不用改。
+
+```
+瀏覽器 --(HttpOnly session cookie)--> web app --(Authorization: Bearer <使用者的 token>)--> A2A agent
+   \--(登入轉址,authorization code + PKCE)--> OIDC provider(docker compose)
+```
+
+```powershell
+docker compose up -d                                    # mock OIDC provider
+$env:OIDC_ISSUER = "http://localhost:8080/a2a"
+python -m a2a_demo.server                               # agent(終端機 1)
+python -m a2a_demo.web                                  # web 介面(終端機 2) -> http://localhost:8000
+```
+
+沒設 `OIDC_ISSUER` 時 agent 是開放的,頁面不需登入。設了之後頁面會先顯示登入畫面;mock IdP 的登入頁可輸入任意使用者名稱
+(例如 `alice`),agent 日誌會顯示 `authenticated sub=alice`。
+
+設計重點:
+- **Backend-for-frontend**:瀏覽器看不到 token,也不直接連 agent(沒有 CORS、`localStorage` 裡也沒東西)。登入流程由 web 伺服器執行
+  (`web/auth.py`,和 `client --login` 同一套 PKCE,只是 `redirect_uri` 是 web 的路由),token 存在記憶體中的 `WebSession`
+  並自動 refresh。瀏覽器只持有不透明的 `HttpOnly; SameSite=Lax` cookie,登入後會換新 id。
+- 它是 public OAuth2 client(`WEB_CLIENT_ID`,預設 `a2a-web`),沒有 secret。mock IdP 接受任何 client id 與 redirect URI;
+  真實 IdP 需先登錄 `WEB_PUBLIC_URL + /auth/callback`。
+- 頁面用 `message/stream` 串流;`/api/chat` 把原始 A2A 事件以 SSE 轉出,所以勾選「wire」看到的就是真實協定。「Stop」會呼叫
+  `tasks/cancel`。模型輸出用 `textContent` 顯示(不當 HTML)。
+- 一個 session 只能延續/取消自己開的對話(`contextId`)與任務。
+- 請在主機上執行,不要放進 compose 網路:OIDC discovery 文件裡的 IdP 網址必須同時讓瀏覽器與 web 伺服器都連得到(`localhost:8080`)。
+- 設定:`A2A_AGENT_URL`、`WEB_HOST`、`WEB_PORT`、`WEB_PUBLIC_URL`、`WEB_CLIENT_ID`。登出只結束 web session,不會登出 IdP 本身
+  (沒有 RP-initiated logout)。
 
 ## 核心概念與對應程式碼
 
