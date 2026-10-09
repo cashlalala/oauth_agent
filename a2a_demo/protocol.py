@@ -206,6 +206,14 @@ class AgentSkill(A2AModel):
     outputModes: list[str] | None = None
 
 
+class OpenIdConnectSecurityScheme(A2AModel):
+    """Card entry telling clients to authenticate via OIDC (OpenAPI-style security scheme)."""
+
+    type: str = "openIdConnect"
+    description: str | None = None
+    openIdConnectUrl: str  # the IdP's .well-known/openid-configuration
+
+
 class AgentCard(A2AModel):
     protocolVersion: str = PROTOCOL_VERSION
     name: str
@@ -217,6 +225,11 @@ class AgentCard(A2AModel):
     defaultInputModes: list[str] = Field(default_factory=lambda: ["text/plain"])
     defaultOutputModes: list[str] = Field(default_factory=lambda: ["text/plain"])
     skills: list[AgentSkill] = Field(default_factory=list)
+    # How to authenticate. Absent = the agent is open. `security` is a list of alternatives
+    # (OR); each maps scheme name -> required scopes. Values are plain dicts so the client can
+    # also read schemes this demo doesn't implement (apiKey, oauth2, ...).
+    securitySchemes: dict[str, dict[str, Any]] | None = None
+    security: list[dict[str, list[str]]] | None = None
 
 
 # --------------------------------------------------------------------------- #

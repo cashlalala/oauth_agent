@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 from collections.abc import AsyncIterator, Callable
@@ -9,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from .auth import A2AAuthError, TokenSource
 from ..protocol import (
     AGENT_CARD_PATH,
     A2AError,
@@ -35,10 +37,12 @@ class A2AClient:
         timeout: float = 120.0,
         trace: TraceFn | None = None,
         http_client: httpx.AsyncClient | None = None,
+        auth: TokenSource | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.trace = trace or (lambda direction, payload: None)
         self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self.auth = auth
         self._ids = itertools.count(1)
         self.card: AgentCard | None = None
         self._rpc_url = self.base_url + "/"
@@ -107,7 +111,7 @@ class A2AClient:
         """One request -> one response. Raises A2AError for JSON-RPC errors."""
         payload = rpc_request(method, params, next(self._ids))
         self.trace("->", payload)
-        resp = await self._http.post(self._rpc_url, json=payload)
+        resp = await self._post(payload)
         resp.raise_for_status()
         body = resp.json()
         self.trace("<-", body)
@@ -117,9 +121,7 @@ class A2AClient:
         """One request -> many responses, delivered as Server-Sent Events."""
         payload = rpc_request(method, params, next(self._ids))
         self.trace("->", payload)
-        async with self._http.stream(
-            "POST", self._rpc_url, json=payload, headers={"Accept": "text/event-stream"}
-        ) as resp:
+        async with self._stream_post(payload) as resp:
             resp.raise_for_status()
             if "text/event-stream" not in resp.headers.get("content-type", ""):
                 # the server rejected the call before streaming: plain JSON-RPC error
@@ -133,6 +135,40 @@ class A2AClient:
                 body = json.loads(line[len("data:"):].strip())
                 self.trace("<- SSE", body)
                 yield self._unwrap(body)
+
+    # ---- auth plumbing: bearer token on every RPC call, one retry on 401 ---- #
+    async def _headers(self, extra: dict[str, str] | None = None, *, refresh: bool = False) -> dict[str, str]:
+        headers = dict(extra or {})
+        if self.auth:
+            headers["Authorization"] = f"Bearer {await self.auth.token(self.card, refresh=refresh)}"
+        return headers
+
+    def _check_auth(self, resp: httpx.Response) -> None:
+        if resp.status_code in (401, 403):
+            need = f" (card security: {self.card.security})" if self.card and self.card.security else ""
+            hint = "" if self.auth else " - no credentials configured"
+            raise A2AAuthError(
+                f"HTTP {resp.status_code}{hint}{need}; WWW-Authenticate: {resp.headers.get('www-authenticate', '-')}"
+            )
+
+    async def _post(self, payload: dict[str, Any]) -> httpx.Response:
+        resp = await self._http.post(self._rpc_url, json=payload, headers=await self._headers())
+        if resp.status_code == 401 and self.auth:  # expired/revoked token: get a fresh one, once
+            resp = await self._http.post(self._rpc_url, json=payload, headers=await self._headers(refresh=True))
+        self._check_auth(resp)
+        return resp
+
+    @contextlib.asynccontextmanager
+    async def _stream_post(self, payload: dict[str, Any]):
+        accept = {"Accept": "text/event-stream"}
+        for attempt in (0, 1):
+            headers = await self._headers(accept, refresh=attempt == 1)
+            async with self._http.stream("POST", self._rpc_url, json=payload, headers=headers) as resp:
+                if resp.status_code == 401 and self.auth and attempt == 0:
+                    continue
+                self._check_auth(resp)
+                yield resp
+                return
 
     @staticmethod
     def _unwrap(body: dict[str, Any]) -> dict[str, Any]:

@@ -1,0 +1,21 @@
+{
+  "interactiveLogin": false,
+  "httpServer": "NettyWrapper",
+  "tokenCallbacks": [
+    {
+      "issuerId": "a2a",
+      "tokenExpiry": 3600,
+      "requestMappings": [
+        {
+          "requestParam": "grant_type",
+          "match": "client_credentials",
+          "claims": {
+            "sub": "a2a-client",
+            "aud": ["a2a-agent"],
+            "scope": "a2a.invoke"
+          }
+        }
+      ]
+    }
+  ]
+}

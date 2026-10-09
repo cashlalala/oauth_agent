@@ -1,0 +1,13 @@
+# Local OIDC provider for the A2A auth demo (https://github.com/navikt/mock-oauth2-server).
+#   docker compose up -d
+# Issuer:    http://localhost:8080/a2a   (the first path segment is the issuer id)
+# Discovery: http://localhost:8080/a2a/.well-known/openid-configuration
+services:
+  mock-oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:latest
+    ports:
+      - "8080:8080"
+    environment:
+      JSON_CONFIG_PATH: /config/config.json
+    volumes:
+      - ./mock-oidc:/config:ro

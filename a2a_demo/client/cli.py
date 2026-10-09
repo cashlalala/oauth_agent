@@ -19,6 +19,7 @@ from ..protocol import (
     TaskStatusUpdateEvent,
     TERMINAL_STATES,
 )
+from .auth import A2AAuthError, add_auth_args, auth_from_args
 from .client import A2AClient
 
 DIM, CYAN, YELLOW, RED, RESET = "\033[2m", "\033[36m", "\033[33m", "\033[31m", "\033[0m"
@@ -56,13 +57,15 @@ async def chat(args: argparse.Namespace) -> None:
     last_task_id: str | None = None
 
     async with httpx.AsyncClient(timeout=120) as http:
-        client = A2AClient(args.url, trace=make_trace(tracing), http_client=http)
+        client = A2AClient(args.url, trace=make_trace(tracing), http_client=http, auth=auth_from_args(args))
         try:
             card = await client.get_agent_card()
         except httpx.HTTPError as e:
             print(f"{RED}cannot reach agent at {args.url}: {e}{RESET}\nIs the server running?")
             return
         print(f"connected to {CYAN}{card.name}{RESET} v{card.version} (streaming={card.capabilities.streaming})")
+        if card.security:
+            print(f"{DIM}agent requires auth: {card.security}{RESET}")
         print(HELP)
 
         while True:
@@ -120,6 +123,8 @@ async def chat(args: argparse.Namespace) -> None:
                         print(f"{CYAN}agent>{RESET} {t.text}")
             except A2AError as e:
                 print(f"{RED}A2A error {e.code}: {e.message}{RESET}")
+            except A2AAuthError as e:
+                print(f"{RED}auth error: {e}{RESET}")
             except httpx.HTTPError as e:
                 print(f"{RED}HTTP error: {e}{RESET}")
 
@@ -164,6 +169,7 @@ def main() -> None:
     p.add_argument("--url", default=f"http://{s.host}:{s.port}", help="base URL of the A2A server")
     p.add_argument("--no-stream", action="store_true", help="use message/send instead of message/stream")
     p.add_argument("--trace", action="store_true", help="print raw JSON-RPC traffic")
+    add_auth_args(p)
     asyncio.run(chat(p.parse_args()))
 
 

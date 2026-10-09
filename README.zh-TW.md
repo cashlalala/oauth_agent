@@ -61,6 +61,47 @@ A2A 是讓**不同的 Agent 之間互相溝通**的開放協定。一個 Agent �
 
 本專案中:**伺服器**是一個提供聊天功能的 Agent,**用戶端**則是呼叫它的另一方。
 
+## 驗證(OIDC)
+
+A2A 協議本身沒有驗證訊息:驗證就是一般的 HTTP 驗證,並由 **Agent Card 告訴用戶端該怎麼做**。
+伺服器沒設 `OIDC_ISSUER` 時不啟用驗證。
+
+```
+用戶端                         Agent (A2A 伺服器)                OIDC 提供者
+  | GET /.well-known/agent-card.json(公開)    |                        |
+  |<-- securitySchemes.oidc.openIdConnectUrl, security: [{oidc: [a2a.invoke]}]
+  | GET openIdConnectUrl  --------------------------------------------->|  discovery
+  | POST token_endpoint  grant_type=client_credentials  ---------------->|
+  |<-- access_token (JWT) ----------------------------------------------|
+  | POST /  Authorization: Bearer <jwt>  ----->|                        |
+  |                                            | GET jwks_uri(快取)--->|
+  |                                            | 驗簽章、iss、aud、exp、scope
+  |<-- JSON-RPC 回應(或 HTTP 401/403 + WWW-Authenticate)               |
+```
+
+用 mock 提供者試試(需要 Docker):
+
+```powershell
+docker compose up -d                       # mock-oauth2-server 在 http://localhost:8080,issuer 為 .../a2a
+$env:OIDC_ISSUER = "http://localhost:8080/a2a"
+python -m a2a_demo.server                  # Agent Card 現在宣告 OIDC;POST / 需要 token
+python -m a2a_demo.client --client-id agent-client --client-secret anything
+python -m a2a_demo.client                  # 沒帶憑證 -> "auth error: HTTP 401 ... card security: ..."
+python demo.py --client-id agent-client --client-secret anything
+```
+
+伺服器設定:`OIDC_ISSUER`(空 = 不驗證)、`OIDC_AUDIENCE`(預設 `a2a-agent`)、`OIDC_SCOPE`
+(預設 `a2a.invoke`,比對 token 的 `scope` 或 `scp`)。用戶端:`--client-id/--client-secret/--scope`
+(或環境變數 `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`),或用 `--token` / `A2A_TOKEN` 直接給現成 token。
+`401` = 沒帶或無效的 token(用戶端會換新 token 重試一次),`403` = token 有效但缺少 scope。
+
+關於 mock 提供者([mock-oidc/config.json](mock-oidc/config.json)):
+- 它會簽出真正的 RS256 JWT,並提供 JWKS 與 OIDC discovery;但預設把 *scope* 放進 `aud`,且沒有 `scope` claim。
+  設定檔針對 client-credentials 請求固定 `aud=a2a-agent`、`scope=a2a.invoke`,讓 Agent 的 audience 與 scope 檢查有意義。
+- 它**不會**檢查 client secret,錯誤的 secret 一樣拿得到 token;secret 只有真正的提供者才會把關
+  (tests/test_auth.py 用行程內的假 IdP 測了這條路徑)。
+- `iss` claim 跟著你呼叫的 URL 走(`localhost:8080`),所以 `OIDC_ISSUER` 必須用同一個 host。
+
 ## 核心概念與對應程式碼
 
 | 概念 | 說明 | 程式碼位置 |
@@ -173,7 +214,8 @@ submitted ─► working ──► completed
 - 只支援 `TextPart`(規格另有 `FilePart`、`DataPart`)。
 - 任務狀態存在記憶體,重啟即消失。可把 `TaskStore` 換成 SQLite/Redis。
 - 沒有 `input-required` 流程、`tasks/resubscribe`、推播通知(push notification)、需驗證的擴充 Agent Card。
-  Agent Card 未宣告 `securitySchemes`,可嘗試在 `app.py` 加入 Bearer token 檢查。
+- 驗證只涵蓋機器對機器的 OIDC(client-credentials)。沒有使用者登入(authorization code + PKCE)、
+  依技能區分的 scope、token introspection/撤銷。
 - 只實作 JSON-RPC 傳輸(規格另有 gRPC 與 HTTP+JSON)。
 - 進階挑戰:寫第二個 Agent,同時是本 Agent 的 A2A **用戶端**與自己的 A2A **伺服器**(Agent 串接)。
 

@@ -11,6 +11,7 @@ import json
 
 import httpx
 
+from a2a_demo.client.auth import A2AAuthError, add_auth_args, auth_from_args
 from a2a_demo.client.client import A2AClient
 from a2a_demo.config import load_settings
 from a2a_demo.protocol import (
@@ -27,7 +28,7 @@ def trace(direction: str, payload) -> None:
     print(f"{DIM}{direction} {json.dumps(payload, ensure_ascii=False, indent=2)}{RESET}")
 
 
-def step(n: int, title: str, why: str) -> None:
+def step(n: float, title: str, why: str) -> None:
     print(f"\n{BOLD}=== Step {n}: {title} ==={RESET}\n{why}\n")
 
 
@@ -35,13 +36,24 @@ def answer(t: Task) -> str:
     return "".join(p.text for a in (t.artifacts or []) for p in a.parts)
 
 
-async def main(url: str) -> None:
+async def main(url: str, auth=None) -> None:
     async with httpx.AsyncClient(timeout=120) as http:
-        c = A2AClient(url, trace=trace, http_client=http)
+        c = A2AClient(url, trace=trace, http_client=http, auth=auth)
 
         step(1, "Discovery", "The client GETs the Agent Card to learn what the agent can do and where to POST.")
         card = await c.get_agent_card()
         print(f"-> {card.name}: skills={[s.id for s in card.skills]} streaming={card.capabilities.streaming}")
+        if card.security:
+            print(f"-> the card declares security: {card.security} (token is fetched from the IdP it points to)")
+
+        if card.security:
+            step(1.5, "Authentication",
+                 "Without a token the HTTP layer answers 401 + WWW-Authenticate (not a JSON-RPC error). "
+                 "With one, every request carries 'Authorization: Bearer <jwt>' from the OIDC provider.")
+            bare = await http.post(card.url, json={"jsonrpc": "2.0", "id": 0, "method": "tasks/get", "params": {"id": "x"}})
+            print(f"no token  -> HTTP {bare.status_code} {bare.headers.get('www-authenticate')}")
+            if auth is None:
+                raise A2AAuthError("this agent needs a token")
 
         step(2, "message/send (blocking)", "One request, one response. The result is a Task; the reply is its artifact.")
         t1 = await c.send_message("My name is Ada. Reply with just 'Hi Ada'.")
@@ -119,4 +131,9 @@ if __name__ == "__main__":
     s = load_settings()
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default=f"http://{s.host}:{s.port}")
-    asyncio.run(main(ap.parse_args().url))
+    add_auth_args(ap)
+    a = ap.parse_args()
+    try:
+        asyncio.run(main(a.url, auth_from_args(a)))
+    except A2AAuthError as e:
+        raise SystemExit(f"auth error: {e}\nPass --client-id/--client-secret (or --token), see --help.")
