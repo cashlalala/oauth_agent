@@ -61,7 +61,15 @@ def build_agent_card(settings: Settings) -> AgentCard:
                 description="Have a multi-turn conversation. Reuse contextId to keep the memory.",
                 tags=["chat", "qa"],
                 examples=["Explain the A2A protocol in two sentences.", "Tell me a joke."],
-            )
+            ),
+            AgentSkill(
+                id="echo",
+                name="Echo / ping (no LLM)",
+                description="'/ping' replies 'pong'; '/echo <text>' replies with <text>. "
+                "Answered locally, so it works without an LLM backend.",
+                tags=["test", "echo"],
+                examples=["/ping", "/echo hello"],
+            ),
         ],
         **secured,
     )

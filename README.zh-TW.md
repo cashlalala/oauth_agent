@@ -20,6 +20,15 @@ python demo.py                        # 終端機 2:逐步導覽所有協定功�
 pytest                                # 離線測試(使用假的 LLM,不需網路)
 ```
 
+### 不需要 LLM 的協定測試
+
+Agent 內建兩個在本地處理、完全不呼叫 LLM 的指令(Agent Card 上的 `echo` 技能):
+`/ping` 回覆 `pong`,`/echo <文字>` 回覆 `<文字>`(逐字串流)。它們走一般的任務生命週期
+(`submitted` → `working` → `completed`),因此 `message/send`、`message/stream`、`tasks/get`、
+`tasks/cancel` 都能用它們測試。在聊天用戶端直接輸入 `/ping` 即可(加 `--trace` 可看 JSON-RPC)。
+這些指令不會被寫入 LLM 的對話記憶。實作在 `server/handler.py::local_command`;
+測試:`test_local_commands_skip_llm`。
+
 ### 環境變數 (`.env`)
 
 | 變數 | 預設值 | 說明 |
@@ -298,6 +307,7 @@ submitted ─► working ──► completed
 | `/cancel [id]` | 對最近(或指定)任務呼叫 `tasks/cancel` |
 | `/trace` | 開關原始 JSON-RPC 線路追蹤 |
 | `/new` | 開新對話(新的 contextId) |
+| `/ping`、`/echo <文字>` | 直接送給 Agent,由伺服器本地回覆(不經 LLM) |
 | `/quit` | 離開 |
 
 ## `demo.py` 導覽的七個步驟

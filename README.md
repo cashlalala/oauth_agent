@@ -20,6 +20,15 @@ python demo.py                        # terminal 2: guided tour of every protoco
 pytest                                # offline tests with a fake LLM (no network)
 ```
 
+### Testing the protocol without an LLM
+
+The agent answers two commands locally, never calling the LLM (skill `echo` on the agent card):
+`/ping` replies `pong` and `/echo <text>` replies `<text>` (streamed word by word). They go through the
+normal task lifecycle (`submitted` → `working` → `completed`), so `message/send`, `message/stream`,
+`tasks/get` and `tasks/cancel` can all be exercised with them. In the chat client just type `/ping`
+(with `--trace` to see the JSON-RPC). They are not added to the LLM's conversation memory.
+Implemented in `server/handler.py::local_command`; test: `test_local_commands_skip_llm`.
+
 ## Layout
 
 ```

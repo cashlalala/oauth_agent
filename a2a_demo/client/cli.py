@@ -33,6 +33,7 @@ HELP = """commands:
   /trace           toggle raw JSON-RPC wire trace
   /new             start a new conversation (new contextId)
   /quit            exit
+  /ping, /echo <t> sent to the agent, answered without an LLM (protocol smoke test)
 anything else is sent to the agent as a chat message."""
 
 
@@ -110,7 +111,7 @@ async def chat(args: argparse.Namespace) -> None:
                         t = await client.get_task(t.id)
                         print(f"{DIM}  poll -> {t.status.state.value}{RESET}")
                     print(f"{CYAN}agent>{RESET} {reply_text(t)}")
-                elif cmd.startswith("/"):
+                elif cmd.startswith("/") and cmd not in ("/ping", "/echo"):  # these two are server-side
                     print("unknown command, try /help")
                 elif streaming[0]:
                     context_id, last_task_id = await _stream_turn(client, line, context_id)

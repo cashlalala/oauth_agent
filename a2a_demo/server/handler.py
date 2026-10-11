@@ -48,6 +48,24 @@ from .store import EventBus, TaskStore
 log = logging.getLogger("a2a.server")
 
 
+def local_command(text: str) -> str | None:
+    """Commands answered without any LLM, for testing the protocol offline.
+    Returns the reply, or None if `text` is not a command (=> ask the LLM)."""
+    cmd, _, arg = text.strip().partition(" ")
+    if cmd == "/ping":
+        return "pong"
+    if cmd == "/echo":
+        return arg.strip() or "(nothing to echo)"
+    return None
+
+
+async def _split(reply: str) -> AsyncIterator[str]:
+    """Yield the reply word by word, so streaming shows several artifact chunks."""
+    parts = reply.split(" ")
+    for i, word in enumerate(parts):
+        yield word if i == len(parts) - 1 else word + " "
+
+
 class A2AHandler:
     def __init__(self, llm: ChatBackend):
         self.llm = llm
@@ -190,12 +208,14 @@ class A2AHandler:
             self._set_state(task, TaskState.working)
 
             history = self.store.contexts[task.contextId]
+            local = local_command(user_msg.text)
             llm_messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *history,
                 {"role": "user", "content": user_msg.text},
             ]
-            async for delta in self.llm.stream(llm_messages):
+            deltas = _split(local) if local is not None else self.llm.stream(llm_messages)
+            async for delta in deltas:
                 chunks.append(delta)
                 self.bus.publish(
                     task_id,
@@ -228,10 +248,11 @@ class A2AHandler:
 
             agent_msg = text_message(Role.agent, reply, taskId=task_id, contextId=task.contextId)
             task.history.append(agent_msg)
-            history += [
-                {"role": "user", "content": user_msg.text},
-                {"role": "assistant", "content": reply},
-            ]
+            if local is None:  # local commands stay out of the LLM's memory
+                history += [
+                    {"role": "user", "content": user_msg.text},
+                    {"role": "assistant", "content": reply},
+                ]
             self._set_state(task, TaskState.completed, agent_msg)
 
         except asyncio.CancelledError:

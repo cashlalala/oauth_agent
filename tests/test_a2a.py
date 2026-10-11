@@ -71,6 +71,22 @@ def test_send_blocking_completes_with_artifact():
     run(go)
 
 
+def test_local_commands_skip_llm():
+    async def go(c, llm):
+        t = await c.send_message("/ping")
+        assert t.status.state == TaskState.completed
+        assert t.artifacts[0].parts[0].text == "pong"
+        t = await c.send_message("/echo hello a2a world")
+        assert t.artifacts[0].parts[0].text == "hello a2a world"
+        events = [e async for e in c.stream_message("/echo one two")]
+        chunks = [e for e in events if isinstance(e, TaskArtifactUpdateEvent) and e.artifact.parts]
+        assert [e.artifact.parts[0].text for e in chunks] == ["one ", "two"]
+        assert events[-1].final
+        assert llm.seen == []  # the LLM was never called
+
+    run(go)
+
+
 def test_context_gives_memory_and_new_task_id():
     async def go(c, llm):
         t1 = await c.send_message("my name is Ada")
