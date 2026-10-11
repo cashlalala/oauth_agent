@@ -45,6 +45,7 @@ tests/test_a2a.py    client <-> server tests, in-process, fake LLM
 tests/test_auth.py   OIDC tests with an in-process fake identity provider
 tests/test_web.py    web UI tests: simulated browser + fake IdP + real agent app
 tests/test_auth_live.py  same flow against the real mock server (skipped if it is not running)
+Dockerfile, k8s/       container image + Kubernetes manifest + nginx reverse-proxy snippet
 docker-compose.yml   mock OIDC provider (navikt/mock-oauth2-server) + mock-oidc/config.json
 ```
 
@@ -196,6 +197,16 @@ Design notes:
   browser and the web server (`localhost:8080`).
 - Settings: `A2A_AGENT_URL`, `WEB_HOST`, `WEB_PORT`, `WEB_PUBLIC_URL`, `WEB_CLIENT_ID`. Logout only ends the web
   session, not the IdP's own session (no RP-initiated logout).
+
+## Deploying to Kubernetes
+
+`Dockerfile` builds the agent image; `k8s/agent.yaml` has the Secret, ConfigMap, Deployment (1 replica: state is
+in-memory) and a `LoadBalancer` Service. `k8s/nginx-a2a.conf` is the reverse-proxy snippet that publishes it at
+`https://dev-auth.mediatek.inc/a2a/` (nginx strips the `/a2a` prefix, SSE buffering off).
+
+- Behind a proxy, set `A2A_PUBLIC_URL` (e.g. `https://dev-auth.mediatek.inc/a2a`): it is the `url` advertised in the
+  agent card, and clients send JSON-RPC there. Default: `http://HOST:PORT/`.
+- Edit the image name, `OPENROUTER_API_KEY`, the LoadBalancer IP / MLB annotations and `imagePullSecrets` before applying.
 
 ## Request flow (streaming)
 

@@ -22,6 +22,8 @@ docker compose up -d                # optional: mock OIDC provider on :8080 (tes
 # with the server started using OIDC_ISSUER=http://localhost:8080/a2a:
 python -m a2a_demo.client --client-id agent-client --client-secret x   # or --login for a browser user login
 
+docker build -t a2a-agent .       # image; deploy with k8s/agent.yaml (see README "Deploying to Kubernetes")
+
 python -m a2a_demo.web             # web UI on http://localhost:8000 (agent must be running; login via OIDC if the agent requires it)
 
 pytest                             # all tests, offline (fake LLM)
@@ -40,6 +42,7 @@ No linter/formatter is configured. Settings come from `.env` (see `.env.example`
 - `message/stream` validates and starts the job *before* opening the SSE response so protocol errors still come back as plain JSON-RPC errors (the client handles a non-`text/event-stream` response for this reason). First SSE event is the `Task`, then status/artifact updates, ending with `final=true`.
 - **Auth** (optional; on when `OIDC_ISSUER` is set): plain HTTP bearer auth, not part of JSON-RPC. The agent card (public) carries `securitySchemes`/`security` with the OIDC discovery URL; `server/auth.py` (`OIDCVerifier`, PyJWT + JWKS cache) is a FastAPI dependency on `POST /` only, failing with HTTP 401/403 + `WWW-Authenticate` (never a JSON-RPC error). `client/auth.py` `TokenSource`s (`ClientCredentials` reads the card -> OIDC discovery -> token endpoint; `AuthorizationCodePKCE` = browser login for a human user via a loopback redirect, refresh-token renewal, `--login`; `StaticBearer`) are injected into `A2AClient(auth=...)`, which retries once on 401 with a fresh token. The mock IdP is `docker-compose.yml` + `mock-oidc/config.json` (navikt/mock-oauth2-server).
 - **Web UI** (`a2a_demo/web/`, separate process, agent untouched): a backend-for-frontend. `web/app.py` serves `static/` (plain HTML/JS) and a small API (`/api/me`, `/api/chat` = SSE of raw A2A events from `A2AClient.stream_message`, `/api/cancel`, `/auth/*`). `web/auth.py` runs the authorization-code + PKCE login with a web route as `redirect_uri` and keeps tokens server-side in `WebSession` (itself a `TokenSource`, refreshes silently); the browser only has an HttpOnly session cookie. No login if the agent card has no `security`. Run it on the host (IdP URLs from discovery must work for browser and server alike). Tests: `tests/test_web.py`.
+- **Deployment**: `Dockerfile` + `k8s/agent.yaml` (single replica, in-memory state) + `k8s/nginx-a2a.conf` (reverse proxy strips `/a2a`). Behind a proxy set `A2A_PUBLIC_URL`: the card `url` overrides the client's RPC endpoint, so it must be the externally reachable URL.
 - Client: `client/client.py` (`A2AClient`) takes an optional injected `httpx.AsyncClient` and a `trace(direction, payload)` callback; the CLI and `demo.py` use the trace hook to print raw JSON-RPC. The agent card's `url` overrides the RPC endpoint after discovery.
 
 ## Testing notes

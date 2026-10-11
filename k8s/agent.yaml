@@ -1,0 +1,70 @@
+# A2A agent server. State is in-memory, so keep replicas: 1.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: a2a-agent
+type: Opaque
+stringData:
+  OPENROUTER_API_KEY: "change-me"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a2a-agent
+data:
+  A2A_SERVER_HOST: "0.0.0.0"
+  A2A_SERVER_PORT: "9999"
+  # Advertised in the agent card; clients send JSON-RPC here (nginx strips /a2a).
+  A2A_PUBLIC_URL: "https://dev-auth.mediatek.inc/a2a"
+  OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"
+  OPENROUTER_MODEL: "openrouter/free"
+  # Set to enable OIDC bearer auth (empty = open agent):
+  OIDC_ISSUER: ""
+  OIDC_AUDIENCE: "a2a-agent"
+  OIDC_SCOPE: "a2a.invoke"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-agent
+  labels: {app: a2a-agent}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: a2a-agent}
+  template:
+    metadata:
+      labels: {app: a2a-agent}
+    spec:
+      imagePullSecrets:
+        - name: abc   # temporary
+      containers:
+        - name: agent
+          image: your-registry/a2a-agent:latest   # TODO: set real image
+          ports:
+            - containerPort: 9999
+          envFrom:
+            - configMapRef: {name: a2a-agent}
+            - secretRef: {name: a2a-agent}
+          readinessProbe:
+            httpGet: {path: /.well-known/agent-card.json, port: 9999}
+          livenessProbe:
+            httpGet: {path: /.well-known/agent-card.json, port: 9999}
+            initialDelaySeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: a2a-agent
+  # annotations:   # TODO: add MLB-specific annotations if your cluster needs them
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 1.2.3.4   # MLB address
+  selector: {app: a2a-agent}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 9999

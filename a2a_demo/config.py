@@ -22,9 +22,14 @@ class Settings:
     oidc_issuer: str = ""
     oidc_audience: str = "a2a-agent"
     oidc_scope: str = "a2a.invoke"  # scope the access token must carry
+    # URL clients use to reach the agent (advertised in the card), e.g. behind a reverse proxy.
+    # Empty = derive from host/port.
+    external_url: str = ""
 
     @property
     def public_url(self) -> str:
+        if self.external_url:
+            return self.external_url.rstrip("/") + "/"
         return f"http://{self.host}:{self.port}/"
 
 
@@ -38,6 +43,7 @@ def load_settings() -> Settings:
         oidc_issuer=os.getenv("OIDC_ISSUER", "").rstrip("/"),
         oidc_audience=os.getenv("OIDC_AUDIENCE", "a2a-agent"),
         oidc_scope=os.getenv("OIDC_SCOPE", "a2a.invoke"),
+        external_url=os.getenv("A2A_PUBLIC_URL", ""),
     )
 
 

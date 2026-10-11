@@ -29,6 +29,7 @@ pytest                                # 離線測試(使用假的 LLM,不需網�
 | `OPENROUTER_MODEL` | `openrouter/free` | 模型;`openrouter/free` 會自動路由到可用的免費模型 |
 | `A2A_SERVER_HOST` | `127.0.0.1` | 伺服器監聽位址 |
 | `A2A_SERVER_PORT` | `9999` | 伺服器監聽埠 |
+| `A2A_PUBLIC_URL` | `http://HOST:PORT/` | agent card 公布的 URL(置於反向代理後時設定) |
 
 ## 專案結構
 
@@ -48,6 +49,7 @@ a2a_demo/
     app.py           Web 介面後端(BFF):靜態頁、/api/chat SSE、/auth/* 登入路由
     auth.py          瀏覽器登入(authorization code + PKCE)、伺服器端 WebSession
     static/          index.html、app.js、style.css(不需建置)
+Dockerfile、k8s/      容器映像檔 + Kubernetes manifest + nginx 反向代理設定片段
 demo.py              帶有線路層(wire-level)追蹤的腳本化導覽
 tests/test_a2a.py    用戶端 <-> 伺服器測試(行程內、假 LLM)
 tests/test_web.py    Web 介面測試:模擬瀏覽器 + 假 IdP + 真實 agent app
@@ -191,6 +193,15 @@ python -m a2a_demo.web                                  # web 介面(終端機 2
 - 請在主機上執行,不要放進 compose 網路:OIDC discovery 文件裡的 IdP 網址必須同時讓瀏覽器與 web 伺服器都連得到(`localhost:8080`)。
 - 設定:`A2A_AGENT_URL`、`WEB_HOST`、`WEB_PORT`、`WEB_PUBLIC_URL`、`WEB_CLIENT_ID`。登出只結束 web session,不會登出 IdP 本身
   (沒有 RP-initiated logout)。
+
+## 部署到 Kubernetes
+
+`Dockerfile` 建置 agent 映像檔;`k8s/agent.yaml` 包含 Secret、ConfigMap、Deployment(1 個 replica:狀態存在記憶體)與
+`LoadBalancer` Service。`k8s/nginx-a2a.conf` 是反向代理設定片段,將其發佈在 `https://dev-auth.mediatek.inc/a2a/`
+(nginx 會去掉 `/a2a` 前綴,並關閉 SSE 緩衝)。
+
+- 在代理後面時請設定 `A2A_PUBLIC_URL`(例如 `https://dev-auth.mediatek.inc/a2a`):它是 agent card 公布的 `url`,用戶端會把 JSON-RPC 送到這裡。預設為 `http://HOST:PORT/`。
+- 套用前請修改映像檔名稱、`OPENROUTER_API_KEY`、LoadBalancer IP / MLB annotations 與 `imagePullSecrets`。
 
 ## 核心概念與對應程式碼
 
